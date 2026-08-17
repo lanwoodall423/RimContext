@@ -43,6 +43,7 @@ public sealed class IndexStore : IDisposable
         }
         catch
         {
+            connection.Close();
             connection.Dispose();
             throw;
         }
@@ -111,6 +112,7 @@ public sealed class IndexStore : IDisposable
         }
         catch
         {
+            connection.Close();
             connection.Dispose();
             throw;
         }
@@ -319,6 +321,7 @@ public sealed class IndexStore : IDisposable
         }
 
         disposed = true;
+        connection.Close();
         connection.Dispose();
     }
 

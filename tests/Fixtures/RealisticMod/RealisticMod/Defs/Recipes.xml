@@ -1,0 +1,20 @@
+<Defs>
+  <RecipeDef>
+    <defName>MakeExampleWeapon</defName>
+    <label>make example weapon</label>
+    <recipeUsers>
+      <li>ExampleBench</li>
+    </recipeUsers>
+    <fixedIngredientFilter>
+      <thingDefs>
+        <li>ExampleWeapon</li>
+      </thingDefs>
+    </fixedIngredientFilter>
+    <products>
+      <li>
+        <thingDef>ExampleWeapon</thingDef>
+        <count>1</count>
+      </li>
+    </products>
+  </RecipeDef>
+</Defs>

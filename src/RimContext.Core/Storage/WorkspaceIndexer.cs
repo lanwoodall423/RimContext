@@ -396,7 +396,15 @@ public sealed class WorkspaceIndexer
                 store.GetEntities(),
                 store.GetRelations());
         }
-        catch (RimContextException ex) when (ex.Error.Code == ErrorCodes.RootMismatch)
+        catch (RimContextException ex) when (ex.Error.Code is
+            ErrorCodes.RootMismatch or
+            ErrorCodes.IndexIncompatible or
+            ErrorCodes.IndexNotFound)
+        {
+            resetRequired = true;
+            return null;
+        }
+        catch (SqliteException)
         {
             resetRequired = true;
             return null;
@@ -541,9 +549,32 @@ public sealed class WorkspaceIndexer
             catch (IOException)
             {
             }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                try
+                {
+                    File.Move(temporaryPath, storePath, overwrite: true);
+                    return;
+                }
+                catch (Exception) when (attempt < 19)
+                {
+                    Thread.Sleep(25);
+                }
+            }
+
+            // Some Windows filesystems reject both replacement APIs for a database
+            // with incompatible metadata. Delete only after all replacement attempts;
+            // a locked target still fails here and is reported to the caller.
+            File.Delete(storePath);
+            File.Move(temporaryPath, storePath);
+            return;
         }
 
-        File.Move(temporaryPath, storePath, overwrite: true);
+        File.Move(temporaryPath, storePath);
     }
 
     private static void TryDeleteTemporary(string path)

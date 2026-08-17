@@ -1,0 +1,12 @@
+<Defs>
+  <ResearchProjectDef>
+    <defName>ExampleWeapons</defName>
+    <label>example weapons</label>
+    <description>Unlocks the example weapon.</description>
+    <researchViewX>5</researchViewX>
+    <researchViewY>2</researchViewY>
+    <prerequisites>
+      <li>ExampleBasics</li>
+    </prerequisites>
+  </ResearchProjectDef>
+</Defs>

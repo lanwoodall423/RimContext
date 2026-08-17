@@ -1,0 +1,20 @@
+<Defs>
+  <ThingDef ParentName="BaseWeapon">
+    <defName>ExampleWeapon</defName>
+    <label>example weapon</label>
+    <thingClass>RealisticMod.ExampleWeapon</thingClass>
+    <recipeMaker>
+      <recipeUsers>
+        <li>ExampleBench</li>
+      </recipeUsers>
+    </recipeMaker>
+  </ThingDef>
+  <ThingDef>
+    <defName>BaseWeapon</defName>
+    <label>base weapon</label>
+  </ThingDef>
+  <ThingDef>
+    <defName>ExampleBench</defName>
+    <label>example bench</label>
+  </ThingDef>
+</Defs>

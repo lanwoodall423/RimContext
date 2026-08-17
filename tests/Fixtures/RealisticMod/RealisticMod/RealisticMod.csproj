@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>RealisticMod</RootNamespace>
+    <AssemblyName>RealisticMod</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SharedFramework\SharedFramework.csproj" />
+  </ItemGroup>
+</Project>

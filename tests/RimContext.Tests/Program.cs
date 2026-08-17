@@ -42,7 +42,9 @@ internal static class Program
             ("Harmony indexing and queries", HarmonyIndexingAndQueries),
             ("mod project and dependency indexing", ModProjectDependencyIndexing),
             ("affected queries", AffectedQueries),
-            ("compact query output", CompactQueryOutput)
+            ("compact query output", CompactQueryOutput),
+            ("production end-to-end workflow", ProductionEndToEndWorkflow),
+            ("store recovery and lock handling", StoreRecoveryAndLockHandling)
         };
 
         var passed = 0;
@@ -180,6 +182,181 @@ internal static class Program
 
         warmTimer.Stop();
         Console.WriteLine($"PERF query_bytes definition={definitionBytes} symbol={symbolBytes} refs={referenceBytes} affected={affectedBytes} warm_definition_avg_ms={warmTimer.Elapsed.TotalMilliseconds / 5:0.0}");
+    }
+
+    private static void ProductionEndToEndWorkflow()
+    {
+        using var workspace = new TempWorkspace();
+        workspace.CopyFrom(RepositoryFixture("RealisticMod"));
+        var configuration = WorkspaceConfiguration.Resolve(workspace.Root);
+
+        var initialTimer = Stopwatch.StartNew();
+        var initial = Run("index", "--root", workspace.Root, "--json");
+        initialTimer.Stop();
+        AssertEqual(0, initial.ExitCode, "production initial index exit code");
+        using var initialJson = ParseJson(initial.Stdout);
+        AssertEqual("ok", initialJson.RootElement.GetProperty("status").GetString(), "production initial index status");
+        var initialData = initialJson.RootElement.GetProperty("data");
+        var initialFiles = initialData.GetProperty("files");
+        Assert(initialFiles.GetProperty("scanned").GetInt32() >= 9, "production fixture scan count");
+        Assert(initialData.GetProperty("duration_ms").GetInt64() >= 0, "production initial duration");
+
+        var summary = Run("summary", "--root", workspace.Root, "--json");
+        AssertEqual(0, summary.ExitCode, "production summary exit code");
+        using (var summaryJson = ParseJson(summary.Stdout))
+        {
+            var data = summaryJson.RootElement.GetProperty("data");
+            Assert(data.GetProperty("mods").GetInt32() >= 1, "production mod count");
+            Assert(data.GetProperty("projects").GetInt32() >= 2, "production project count");
+            Assert(data.GetProperty("defs").GetInt32() >= 5, "production def count");
+            Assert(data.GetProperty("harmony_patches").GetInt32() >= 1, "production Harmony count");
+        }
+
+        var definition = Run("definition", "ThingDef/ExampleWeapon", "--root", workspace.Root, "--json");
+        AssertEqual(0, definition.ExitCode, "production Def lookup exit code");
+        using (var definitionJson = ParseJson(definition.Stdout))
+        {
+            var item = definitionJson.RootElement.GetProperty("results").EnumerateArray().Single();
+            AssertEqual("ExampleWeapon", item.GetProperty("defName").GetString(), "production Def name");
+        }
+
+        var symbol = Run("definition", "RealisticMod.ExampleWeapon", "--root", workspace.Root, "--json");
+        AssertEqual(0, symbol.ExitCode, "production C# symbol lookup exit code");
+        using (var symbolJson = ParseJson(symbol.Stdout))
+        {
+            AssertEqual("csharp_type", symbolJson.RootElement.GetProperty("results").EnumerateArray()
+                .Single().GetProperty("kind").GetString(), "production C# symbol kind");
+        }
+
+        var references = Run("refs", "ThingDef/ExampleWeapon", "--root", workspace.Root, "--json");
+        AssertEqual(0, references.ExitCode, "production refs exit code");
+        using (var referencesJson = ParseJson(references.Stdout))
+        {
+            var data = referencesJson.RootElement.GetProperty("data");
+            Assert(GetArray(data, "incoming").Length > 0, "production incoming Def refs");
+        }
+
+        var harmony = Run("harmony", "ExampleWeapon.TickWeapon", "--root", workspace.Root, "--json");
+        AssertEqual(0, harmony.ExitCode, "production Harmony query exit code");
+        using (var harmonyJson = ParseJson(harmony.Stdout))
+        {
+            Assert(harmonyJson.RootElement.GetProperty("results").EnumerateArray()
+                .Any(item => GetArray(item, "patches").Length > 0), "production Harmony patch");
+        }
+
+        var affected = Run("affected", "RealisticMod/Defs/Weapons.xml", "--root", workspace.Root, "--json");
+        AssertEqual(0, affected.ExitCode, "production affected exit code");
+        using (var affectedJson = ParseJson(affected.Stdout))
+        {
+            Assert(GetArray(affectedJson.RootElement.GetProperty("data"), "direct").Length > 0,
+                "production affected direct tier");
+        }
+
+        var noOpTimer = Stopwatch.StartNew();
+        var noOp = Run("index", "--root", workspace.Root, "--json");
+        noOpTimer.Stop();
+        AssertEqual(0, noOp.ExitCode, "production no-op index exit code");
+        using (var noOpJson = ParseJson(noOp.Stdout))
+        {
+            var files = noOpJson.RootElement.GetProperty("data").GetProperty("files");
+            AssertEqual(0, files.GetProperty("added").GetInt32(), "production no-op added");
+            AssertEqual(0, files.GetProperty("changed").GetInt32(), "production no-op changed");
+            AssertEqual(0, files.GetProperty("removed").GetInt32(), "production no-op removed");
+        }
+
+        workspace.Write("RealisticMod/Source/ModSettings.cs", "namespace RealisticMod; public static class ModSettings { public const string WeaponDef = \"ExampleWeapon\"; public const int Revision = 2; }\n");
+        var changed = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(0, changed.ExitCode, "production changed index exit code");
+        using (var changedJson = ParseJson(changed.Stdout))
+        {
+            AssertEqual(1, changedJson.RootElement.GetProperty("data").GetProperty("files").GetProperty("changed").GetInt32(),
+                "production changed file count");
+        }
+
+        var affectedAfterChange = Run("affected", "RealisticMod/Source/ModSettings.cs", "--root", workspace.Root, "--json");
+        AssertEqual(0, affectedAfterChange.ExitCode, "production repeated affected exit code");
+        using (var affectedJson = ParseJson(affectedAfterChange.Stdout))
+        {
+            Assert(GetArray(affectedJson.RootElement.GetProperty("data"), "direct").Length > 0,
+                "production repeated affected direct tier");
+        }
+
+        workspace.Delete("RealisticMod/Defs/Research.xml");
+        var deleted = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(0, deleted.ExitCode, "production deletion index exit code");
+        using (var deletedJson = ParseJson(deleted.Stdout))
+        {
+            AssertEqual(1, deletedJson.RootElement.GetProperty("data").GetProperty("files").GetProperty("removed").GetInt32(),
+                "production deleted file count");
+        }
+
+        var removedDefinition = Run("definition", "ResearchProjectDef/ExampleWeapons", "--root", workspace.Root, "--json");
+        AssertEqual(4, removedDefinition.ExitCode, "production deleted Def query exit code");
+        using (var removedJson = ParseJson(removedDefinition.Stdout))
+        {
+            AssertEqual(ErrorCodes.NotFound, removedJson.RootElement.GetProperty("code").GetString(), "production deleted Def error");
+        }
+
+        var databaseSize = new FileInfo(configuration.StorePath).Length;
+        var queryTimer = Stopwatch.StartNew();
+        for (var iteration = 0; iteration < 5; iteration++)
+        {
+            var query = Run("definition", "ThingDef/ExampleWeapon", "--root", workspace.Root, "--json");
+            AssertEqual(0, query.ExitCode, "production warm query exit code");
+        }
+
+        queryTimer.Stop();
+        var definitionBytes = Encoding.UTF8.GetByteCount(definition.Stdout.TrimEnd());
+        var referencesBytes = Encoding.UTF8.GetByteCount(references.Stdout.TrimEnd());
+        var affectedBytes = Encoding.UTF8.GetByteCount(affected.Stdout.TrimEnd());
+        Console.WriteLine($"PERF e2e initial_ms={initialTimer.Elapsed.TotalMilliseconds:0.0} index_duration_ms={initialData.GetProperty("duration_ms").GetInt64()} noop_ms={noOpTimer.Elapsed.TotalMilliseconds:0.0} query_avg_ms={queryTimer.Elapsed.TotalMilliseconds / 5:0.0} definition_bytes={definitionBytes} refs_bytes={referencesBytes} affected_bytes={affectedBytes} database_bytes={databaseSize}");
+    }
+
+    private static void StoreRecoveryAndLockHandling()
+    {
+        using var workspace = new TempWorkspace();
+        workspace.Write("Source/A.cs", "public class A {}\n");
+        var configuration = WorkspaceConfiguration.Resolve(workspace.Root);
+        AssertEqual(0, Run("index", "--root", workspace.Root, "--json").ExitCode, "recovery initial index");
+
+        File.WriteAllText(configuration.StorePath + ".tmp", "interrupted temporary store");
+        var recoveredTemporary = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(0, recoveredTemporary.ExitCode, "interrupted temporary recovery");
+        Assert(!File.Exists(configuration.StorePath + ".tmp"), "stale temporary store removed");
+
+        File.WriteAllText(configuration.StorePath, "not a SQLite database");
+        var recoveredCorruption = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(0, recoveredCorruption.ExitCode, "corrupt database recovery");
+        using (var summary = ParseJson(Run("summary", "--root", workspace.Root, "--json").Stdout))
+        {
+            AssertEqual("ok", summary.RootElement.GetProperty("status").GetString(), "recovered database summary");
+        }
+
+        File.Delete(configuration.StorePath);
+        var incompatibleMetadata = new StoreMetadata(
+            999,
+            IndexConstants.ToolVersion,
+            configuration.WorkspaceIdentity,
+            configuration.RootPath,
+            configuration.ConfigurationFingerprint,
+            FixedTime.ToString("O", CultureInfo.InvariantCulture));
+        using (var incompatibleStore = IndexStore.CreateNew(configuration.StorePath, incompatibleMetadata))
+        {
+        }
+
+        var migrated = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(0, migrated.ExitCode, "schema mismatch rebuild");
+        using (var schemaSummary = ParseJson(Run("summary", "--root", workspace.Root, "--json").Stdout))
+        {
+            AssertEqual("ok", schemaSummary.RootElement.GetProperty("status").GetString(), "schema rebuild summary");
+        }
+
+        var lockPath = configuration.StorePath + ".lock";
+        using var heldLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var locked = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(4, locked.ExitCode, "concurrent index lock exit code");
+        using var lockedJson = ParseJson(locked.Stdout);
+        AssertEqual(ErrorCodes.StoreLocked, lockedJson.RootElement.GetProperty("code").GetString(), "concurrent index lock code");
     }
 
     private static void SchemaCreation()
@@ -1301,6 +1478,23 @@ internal static class Program
         }
     }
 
+    private static string RepositoryFixture(string name)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, "tests", "Fixtures", name);
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException($"Fixture '{name}' was not found from '{AppContext.BaseDirectory}'.");
+    }
+
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);
 
     private sealed class TempWorkspace : IDisposable
@@ -1313,9 +1507,33 @@ internal static class Program
 
         public string Root { get; }
 
+        public void CopyFrom(string sourceRoot)
+        {
+            foreach (var sourcePath in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+            {
+                var relativePath = Path.GetRelativePath(sourceRoot, sourcePath);
+                var relativeSegments = relativePath.Split(
+                    [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                    StringSplitOptions.RemoveEmptyEntries);
+                if (relativeSegments.Any(segment => segment is ".git" or ".rimctx" or "bin" or "obj"))
+                {
+                    continue;
+                }
+
+                var destinationPath = Resolve(relativePath);
+                var parent = Path.GetDirectoryName(destinationPath);
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
+
+                System.IO.File.Copy(sourcePath, destinationPath, overwrite: true);
+            }
+        }
+
         public void Write(string relativePath, string content)
         {
-            var path = Path.Combine(Root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            var path = Resolve(relativePath);
             var parent = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(parent))
             {
@@ -1327,14 +1545,14 @@ internal static class Program
 
         public void Delete(string relativePath)
         {
-            var path = Path.Combine(Root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            var path = Resolve(relativePath);
             System.IO.File.Delete(path);
         }
 
         public void Rename(string relativePath, string newRelativePath)
         {
-            var source = Path.Combine(Root, relativePath.Replace('/', Path.DirectorySeparatorChar));
-            var destination = Path.Combine(Root, newRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            var source = Resolve(relativePath);
+            var destination = Resolve(newRelativePath);
             var parent = Path.GetDirectoryName(destination);
             if (!string.IsNullOrEmpty(parent))
             {
@@ -1342,6 +1560,14 @@ internal static class Program
             }
 
             System.IO.File.Move(source, destination);
+        }
+
+        private string Resolve(string relativePath)
+        {
+            var platformPath = relativePath
+                .Replace('/', Path.DirectorySeparatorChar)
+                .Replace('\\', Path.DirectorySeparatorChar);
+            return Path.Combine(Root, platformPath);
         }
 
         public void Dispose()
