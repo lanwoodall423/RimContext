@@ -2,6 +2,8 @@
 
 RimContext is a local, deterministic RimWorld mod source/Defs/Harmony/dependency index for AI-agent
 navigation. It does not launch RimWorld or replace DevBridge2/RimBridgeServer runtime responsibilities.
+When RimTest is present, agents should start with RimTest and use `rimctx` directly only for narrowed
+source/dependency inspection.
 
 ## Build and run
 
