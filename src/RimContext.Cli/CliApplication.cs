@@ -20,24 +20,26 @@ public static class CliApplication
 
         var logger = new TextWriterLogger(stderr);
         var command = GetCommandForError(args);
+        var outputOptions = new JsonOutputOptions();
         try
         {
             var request = CliParser.Parse(args);
             command = request.Command;
+            outputOptions = new JsonOutputOptions(request.Compact, request.MaxBytes, request.Human);
             var envelope = Execute(request, logger);
-            JsonOutput.Write(stdout, envelope);
+            JsonOutput.Write(stdout, envelope, outputOptions);
             return 0;
         }
         catch (RimContextException ex)
         {
-            JsonOutput.Write(stdout, JsonOutput.Error(command, ex.Error));
+            JsonOutput.Write(stdout, JsonOutput.Error(command, ex.Error), outputOptions);
             return ex.ExitCode;
         }
         catch (Exception ex)
         {
             logger.Error($"{ex.GetType().Name}: {ex.Message}");
             var error = ErrorFactory.Internal("An unexpected internal error occurred.").Error;
-            JsonOutput.Write(stdout, JsonOutput.Error(command, error));
+            JsonOutput.Write(stdout, JsonOutput.Error(command, error), outputOptions);
             return 10;
         }
     }
@@ -47,7 +49,7 @@ public static class CliApplication
         CliCommands.Help => JsonOutput.Success(CliCommands.Help, new
         {
             commands = CliCommands.All,
-            usage = "rimctx <command> [options] --json"
+            usage = "rimctx <command> [selector ...] --json [--compact|--human] [--limit N] [--max-bytes N]"
         }),
         CliCommands.Version => JsonOutput.Success(CliCommands.Version, new VersionResponse(
             IndexConstants.ToolVersion,
@@ -171,9 +173,11 @@ public static class CliApplication
         var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
         using var store = IndexStore.OpenReadOnly(configuration);
         var engine = new SemanticQueryEngine(store);
+        var page = engine.FindResultsPage(request.Subject!, request.Limit, request.Kind);
         return JsonOutput.Success(
             CliCommands.Find,
-            results: engine.FindResults(request.Subject!, request.Limit, request.Kind));
+            results: page.Items,
+            meta: new JsonQueryMetadata(page.Count, page.Truncated));
     }
 
     private static JsonEnvelope ExecuteDefinition(CliRequest request)
@@ -181,9 +185,16 @@ public static class CliApplication
         var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
         using var store = IndexStore.OpenReadOnly(configuration);
         var engine = new SemanticQueryEngine(store);
+        var page = engine.FindDefinitionResultsPage(request.Subject!, request.Limit);
+        if (page.Count == 0)
+        {
+            throw ErrorFactory.NotFound(request.Subject!);
+        }
+
         return JsonOutput.Success(
             CliCommands.Definition,
-            results: engine.FindDefinitionResults(request.Subject!, request.Limit));
+            results: page.Items,
+            meta: new JsonQueryMetadata(page.Count, page.Truncated));
     }
 
     private static JsonEnvelope ExecuteRefs(CliRequest request)
@@ -191,14 +202,20 @@ public static class CliApplication
         var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
         using var store = IndexStore.OpenReadOnly(configuration);
         var engine = new SemanticQueryEngine(store);
-        var references = engine.FindReferences(request.Subject!, request.Limit, request.Direction);
+        var page = engine.FindReferencesPage(request.Subject!, request.Limit, request.Direction);
+        if (!page.Found)
+        {
+            throw ErrorFactory.NotFound(request.Subject!);
+        }
+
         return JsonOutput.Success(
             CliCommands.Refs,
             data: new
             {
-                incoming = references.Incoming,
-                outgoing = references.Outgoing
-            });
+                incoming = page.Result.Incoming,
+                outgoing = page.Result.Outgoing
+            },
+            meta: new JsonQueryMetadata(page.Count, page.Truncated));
     }
 
     private static JsonEnvelope ExecuteFile(CliRequest request)
@@ -206,9 +223,16 @@ public static class CliApplication
         var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
         using var store = IndexStore.OpenReadOnly(configuration);
         var engine = new SemanticQueryEngine(store);
+        var page = engine.FindFilesPage(request.Subject!, request.Limit);
+        if (page.Count == 0)
+        {
+            throw ErrorFactory.NotFound(request.Subject!);
+        }
+
         return JsonOutput.Success(
             CliCommands.File,
-            results: engine.FindFiles(request.Subject!, request.Limit));
+            results: page.Items,
+            meta: new JsonQueryMetadata(page.Count, page.Truncated));
     }
 
     private static JsonEnvelope ExecuteHarmony(CliRequest request)
@@ -216,9 +240,11 @@ public static class CliApplication
         var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
         using var store = IndexStore.OpenReadOnly(configuration);
         var engine = new SemanticQueryEngine(store);
+        var page = engine.FindHarmonyPage(request.Subject, request.File, request.Limit);
         return JsonOutput.Success(
             CliCommands.Harmony,
-            results: engine.FindHarmony(request.Subject, request.File, request.Limit));
+            results: page.Items,
+            meta: new JsonQueryMetadata(page.Count, page.Truncated));
     }
 
     private static JsonEnvelope ExecuteAffected(CliRequest request)
@@ -226,9 +252,13 @@ public static class CliApplication
         var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
         using var store = IndexStore.OpenReadOnly(configuration);
         var engine = new SemanticQueryEngine(store);
+        var result = engine.FindAffected(request.Inputs, configuration.RootPath, request.Depth, request.Limit);
         return JsonOutput.Success(
             CliCommands.Affected,
-            data: engine.FindAffected(request.Inputs, configuration.RootPath, request.Depth, request.Limit));
+            data: result,
+            meta: new JsonQueryMetadata(
+                result.Direct.Count + result.Dependent.Count + result.RuntimeRisk.Count,
+                result.Truncated));
     }
 
     private static string GetCommandForError(IReadOnlyList<string> args)

@@ -54,7 +54,10 @@ public static class CliParser
         var positionals = new List<string>();
         var force = false;
         var json = false;
+        var compact = true;
+        var human = false;
         var limit = IndexConstants.DefaultLimit;
+        int? maxBytes = null;
         var depth = IndexConstants.DefaultAffectedDepth;
         var direction = "both";
 
@@ -80,6 +83,22 @@ public static class CliParser
                     }
 
                     json = true;
+                    break;
+                case "--compact":
+                    if (inlineValue is not null)
+                    {
+                        throw ErrorFactory.InvalidArgument("The --compact option does not accept a value.");
+                    }
+
+                    compact = true;
+                    break;
+                case "--human":
+                    if (inlineValue is not null)
+                    {
+                        throw ErrorFactory.InvalidArgument("The --human option does not accept a value.");
+                    }
+
+                    human = true;
                     break;
                 case "--force":
                     if (inlineValue is not null)
@@ -115,6 +134,9 @@ public static class CliParser
                 case "--limit":
                     limit = ParseLimit(ReadValue(args, ref index, option, inlineValue));
                     break;
+                case "--max-bytes":
+                    maxBytes = ParseMaxBytes(ReadValue(args, ref index, option, inlineValue));
+                    break;
                 case "--depth":
                     depth = ParseDepth(ReadValue(args, ref index, option, inlineValue));
                     break;
@@ -123,6 +145,11 @@ public static class CliParser
                 default:
                     throw ErrorFactory.InvalidArgument($"Unknown option '{option}'.");
             }
+        }
+
+        if (json && human)
+        {
+            throw ErrorFactory.InvalidArgument("--json and --human cannot be combined.");
         }
 
         ValidateCommandOptions(command, positionals, force, assemblyRoots, kind, direction, depth, file);
@@ -139,7 +166,10 @@ public static class CliParser
             assemblyRoots,
             force,
             json,
+            compact,
+            human,
             limit,
+            maxBytes,
             depth,
             direction,
             kind,
@@ -149,7 +179,7 @@ public static class CliParser
     private static CliRequest HelpRequest() => Request(CliCommands.Help);
 
     private static CliRequest Request(string command) =>
-        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, IndexConstants.DefaultLimit, IndexConstants.DefaultAffectedDepth, "both", null, null);
+        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, true, false, IndexConstants.DefaultLimit, null, IndexConstants.DefaultAffectedDepth, "both", null, null);
 
     private static string ReadValue(IReadOnlyList<string> args, ref int index, string option, string? inlineValue)
     {
@@ -195,6 +225,21 @@ public static class CliParser
         }
 
         return depth;
+    }
+
+    private static int ParseMaxBytes(string value)
+    {
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var maxBytes) || maxBytes <= 0)
+        {
+            throw ErrorFactory.InvalidArgument("--max-bytes must be a positive integer.");
+        }
+
+        if (maxBytes > IndexConstants.MaximumOutputBytes)
+        {
+            throw ErrorFactory.LimitExceeded($"--max-bytes cannot exceed {IndexConstants.MaximumOutputBytes}.");
+        }
+
+        return maxBytes;
     }
 
     private static void ValidateCommandOptions(

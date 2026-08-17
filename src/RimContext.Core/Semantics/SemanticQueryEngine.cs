@@ -63,6 +63,17 @@ public sealed record ReferenceResult(
     IReadOnlyList<ReferenceMatch> Incoming,
     IReadOnlyList<ReferenceMatch> Outgoing);
 
+public sealed record QueryPage<T>(
+    IReadOnlyList<T> Items,
+    int Count,
+    bool Truncated);
+
+public sealed record ReferenceQueryPage(
+    ReferenceResult Result,
+    int Count,
+    bool Truncated,
+    bool Found);
+
 public sealed record FileEntitySummary(
     string Kind,
     string Id,
@@ -216,41 +227,57 @@ public sealed class SemanticQueryEngine
 
     public IReadOnlyList<DefinitionMatch> FindDefinitions(string selector, int limit)
     {
-        return FindResults(selector, limit, "def")
+        return FindResultsPage(selector, limit, "def")
+            .Items
             .OfType<DefinitionMatch>()
             .ToArray();
     }
 
     public IReadOnlyList<object> FindResults(string selector, int limit, string? kind = null)
     {
+        return FindResultsPage(selector, limit, kind).Items;
+    }
+
+    public QueryPage<object> FindResultsPage(string selector, int limit, string? kind = null)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(selector);
         var candidates = BuildCandidates(selector, kind);
-        return candidates
+        var ordered = candidates
             .OrderBy(item => item.Score)
             .ThenBy(item => KindOrder(item.Kind))
             .ThenBy(item => item.Kind, StringComparer.Ordinal)
             .ThenBy(item => item.Label, StringComparer.Ordinal)
             .ThenBy(item => item.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, limit))
             .Select(item => item.Result)
             .ToArray();
+        return Page(ordered, limit);
     }
 
     public IReadOnlyList<object> FindDefinitionResults(string selector, int limit)
     {
+        return FindDefinitionResultsPage(selector, limit).Items;
+    }
+
+    public QueryPage<object> FindDefinitionResultsPage(string selector, int limit)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(selector);
-        return BuildCandidates(selector, null)
+        var ordered = BuildCandidates(selector, null)
             .Where(item => item.Score == 0)
             .OrderBy(item => KindOrder(item.Kind))
             .ThenBy(item => item.Kind, StringComparer.Ordinal)
             .ThenBy(item => item.Label, StringComparer.Ordinal)
             .ThenBy(item => item.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, limit))
             .Select(item => item.Result)
             .ToArray();
+        return Page(ordered, limit);
     }
 
     public ReferenceResult FindReferences(string selector, int limit, string direction = "both")
+    {
+        return FindReferencesPage(selector, limit, direction).Result;
+    }
+
+    public ReferenceQueryPage FindReferencesPage(string selector, int limit, string direction = "both")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(selector);
         var candidates = BuildCandidates(selector, null)
@@ -265,45 +292,61 @@ public sealed class SemanticQueryEngine
 
         if (candidates.Length == 0)
         {
-            return new ReferenceResult([], []);
+            return new ReferenceQueryPage(new ReferenceResult([], []), 0, false, false);
         }
 
         var targetId = candidates[0].Id;
+        var requestedLimit = Math.Max(1, limit);
         var incoming = direction is "in" or "both"
-            ? relations
-                .Where(relation => string.Equals(relation.ToId, targetId, StringComparison.Ordinal))
-                .OrderBy(relation => relation.Id, StringComparer.Ordinal)
-                .Take(Math.Max(1, limit))
+            ? DistinctReferenceRelations(relations
+                .Where(relation => string.Equals(relation.ToId, targetId, StringComparison.Ordinal)))
                 .Select(relation => ToReference(relation, "incoming"))
                 .ToArray()
             : [];
         var outgoing = direction is "out" or "both"
-            ? relations
-                .Where(relation => string.Equals(relation.FromId, targetId, StringComparison.Ordinal))
-                .OrderBy(relation => relation.Id, StringComparer.Ordinal)
-                .Take(Math.Max(1, limit))
+            ? DistinctReferenceRelations(relations
+                .Where(relation => string.Equals(relation.FromId, targetId, StringComparison.Ordinal)))
                 .Select(relation => ToReference(relation, "outgoing"))
                 .ToArray()
             : [];
-        return new ReferenceResult(incoming, outgoing);
+        var incomingPage = incoming.Take(requestedLimit).ToArray();
+        var outgoingPage = outgoing.Take(requestedLimit).ToArray();
+        return new ReferenceQueryPage(
+            new ReferenceResult(incomingPage, outgoingPage),
+            incomingPage.Length + outgoingPage.Length,
+            incoming.Length > incomingPage.Length || outgoing.Length > outgoingPage.Length,
+            true);
     }
 
     public IReadOnlyList<FileSummaryMatch> FindFiles(string selector, int limit)
     {
+        return FindFilesPage(selector, limit).Items;
+    }
+
+    public QueryPage<FileSummaryMatch> FindFilesPage(string selector, int limit)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(selector);
         var normalized = selector.Trim().Replace('\\', '/');
-        return files
+        var matches = files
             .Where(file =>
                 string.Equals(file.Id, selector.Trim(), StringComparison.Ordinal) ||
                 string.Equals(file.Path, normalized, StringComparison.OrdinalIgnoreCase))
             .OrderBy(file => file.Path, StringComparer.Ordinal)
             .ThenBy(file => file.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, limit))
             .Select(CreateFileSummary)
             .ToArray();
+        return Page(matches, limit);
     }
 
     public IReadOnlyList<HarmonyTargetMatch> FindHarmony(
+        string? selector,
+        string? filePath,
+        int limit)
+    {
+        return FindHarmonyPage(selector, filePath, limit).Items;
+    }
+
+    public QueryPage<HarmonyTargetMatch> FindHarmonyPage(
         string? selector,
         string? filePath,
         int limit)
@@ -340,12 +383,11 @@ public sealed class SemanticQueryEngine
                     .ToArray()))
             .OrderBy(item => item.Score)
             .ThenBy(item => item.Target, StringComparer.Ordinal)
-            .Take(Math.Max(1, limit))
             .Select(item => new HarmonyTargetMatch(
                 item.Target,
                 item.Patches.Select(ToHarmonyMatch).ToArray()))
             .ToArray();
-        return candidates;
+        return Page(candidates, limit);
     }
 
     public AffectedResult FindAffected(
@@ -1325,6 +1367,36 @@ public sealed class SemanticQueryEngine
         "assembly" => 7,
         _ => 8
     };
+
+    private static QueryPage<T> Page<T>(IReadOnlyList<T> items, int limit)
+    {
+        var requestedLimit = Math.Max(1, limit);
+        var page = items.Take(requestedLimit).ToArray();
+        return new QueryPage<T>(page, page.Length, page.Length < items.Count);
+    }
+
+    private IEnumerable<RelationRecord> DistinctReferenceRelations(
+        IEnumerable<RelationRecord> candidates)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var relation in candidates.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var payload = ParsePayload(relation.PayloadJson);
+            payload.TryGetValue("target", out var target);
+            payload.TryGetValue("field", out var field);
+            var key = string.Join(
+                '\0',
+                relation.Kind,
+                relation.FromId,
+                relation.ToId ?? string.Empty,
+                target ?? string.Empty,
+                field ?? string.Empty);
+            if (seen.Add(key))
+            {
+                yield return relation;
+            }
+        }
+    }
 
     private static string DisplayTypeName(string identity)
     {

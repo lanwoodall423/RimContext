@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using RimContext.Cli;
@@ -40,7 +41,8 @@ internal static class Program
             ("C# semantic entities and queries", CSharpSemanticEntitiesAndQueries),
             ("Harmony indexing and queries", HarmonyIndexingAndQueries),
             ("mod project and dependency indexing", ModProjectDependencyIndexing),
-            ("affected queries", AffectedQueries)
+            ("affected queries", AffectedQueries),
+            ("compact query output", CompactQueryOutput)
         };
 
         var passed = 0;
@@ -99,24 +101,85 @@ internal static class Program
 
     private static void InvalidInput()
     {
+        using var workspace = NewIndexedWorkspace();
+        AssertEqual(0, Run("index", "--root", workspace.Root, "--json").ExitCode, "invalid-input fixture index");
         var unknown = Run("does-not-exist", "--json");
         AssertEqual(2, unknown.ExitCode, "unknown command exit code");
         using (var document = ParseJson(unknown.Stdout))
         {
-            AssertEqual(ErrorCodes.InvalidArgument, document.RootElement.GetProperty("error").GetProperty("code").GetString(), "unknown command code");
+            AssertEqual(ErrorCodes.InvalidArgument, document.RootElement.GetProperty("code").GetString(), "unknown command code");
         }
 
         var missingSelector = Run("find", "--json");
         AssertEqual(2, missingSelector.ExitCode, "missing selector exit code");
         using (var document = ParseJson(missingSelector.Stdout))
         {
-            AssertEqual(ErrorCodes.InvalidArgument, document.RootElement.GetProperty("error").GetProperty("code").GetString(), "missing selector code");
+            AssertEqual(ErrorCodes.InvalidArgument, document.RootElement.GetProperty("code").GetString(), "missing selector code");
         }
 
         var tooLarge = Run("find", "ThingDef", "--limit", "101", "--json");
         AssertEqual(2, tooLarge.ExitCode, "limit exit code");
         using var limitJson = ParseJson(tooLarge.Stdout);
-        AssertEqual(ErrorCodes.LimitExceeded, limitJson.RootElement.GetProperty("error").GetProperty("code").GetString(), "limit code");
+        AssertEqual(ErrorCodes.LimitExceeded, limitJson.RootElement.GetProperty("code").GetString(), "limit code");
+
+        var conflictingModes = Run("version", "--json", "--human");
+        AssertEqual(2, conflictingModes.ExitCode, "conflicting output modes exit code");
+        using var conflictingModesJson = ParseJson(conflictingModes.Stdout);
+        AssertEqual(ErrorCodes.InvalidArgument, conflictingModesJson.RootElement.GetProperty("code").GetString(), "conflicting output modes code");
+
+        using var notFound = ParseJson(Run("definition", "ThingDef/Missing", "--root", workspace.Root, "--json").Stdout);
+        AssertEqual(ErrorCodes.NotFound, notFound.RootElement.GetProperty("code").GetString(), "not found code");
+        AssertEqual("ThingDef/Missing not found", notFound.RootElement.GetProperty("message").GetString(), "not found message");
+        Assert(!notFound.RootElement.TryGetProperty("error", out _), "error should not be nested");
+    }
+
+    private static void CompactQueryOutput()
+    {
+        using var workspace = NewXmlWorkspace();
+        workspace.Write(
+            "Source/Weapon.cs",
+            "namespace Test; public class Weapon { public void Fire() {} }\n");
+        var index = Run("index", "--root", workspace.Root, "--json");
+        AssertEqual(0, index.ExitCode, "compact fixture index");
+
+        var definition = Run("definition", "ThingDef/MyWeapon", "--root", workspace.Root, "--json");
+        var symbol = Run("find", "Test.Weapon", "--root", workspace.Root, "--json");
+        var references = Run("refs", "ThingDef/MyWeapon", "--root", workspace.Root, "--json");
+        var affected = Run("affected", "Mods/TestMod/Defs/Weapons.xml", "--root", workspace.Root, "--json");
+        var definitionBytes = Encoding.UTF8.GetByteCount(definition.Stdout);
+        var symbolBytes = Encoding.UTF8.GetByteCount(symbol.Stdout);
+        var referenceBytes = Encoding.UTF8.GetByteCount(references.Stdout);
+        var affectedBytes = Encoding.UTF8.GetByteCount(affected.Stdout);
+
+        Assert(definitionBytes < 1024, "exact definition should stay below 1 KB");
+        Assert(symbolBytes < 1024, "exact symbol should stay below 1 KB");
+        Assert(referenceBytes < 3072, "references should stay below 3 KB");
+        Assert(affectedBytes < 5120, "affected should stay below 5 KB");
+
+        using var definitionJson = ParseJson(definition.Stdout);
+        AssertEqual(false, definitionJson.RootElement.GetProperty("meta").GetProperty("truncated").GetBoolean(), "definition not truncated");
+        using var affectedJson = ParseJson(affected.Stdout);
+        AssertEqual(false, affectedJson.RootElement.GetProperty("meta").GetProperty("truncated").GetBoolean(), "affected not truncated");
+
+        var limited = Run("affected", "Mods/TestMod/Defs/Weapons.xml", "--root", workspace.Root, "--max-bytes", "256", "--json");
+        using var limitedJson = ParseJson(limited.Stdout);
+        Assert(Encoding.UTF8.GetByteCount(limited.Stdout.TrimEnd()) <= 256, "byte-limited response should be bounded");
+        Assert(limitedJson.RootElement.TryGetProperty("truncated", out var topTruncated)
+            ? topTruncated.GetBoolean()
+            : limitedJson.RootElement.GetProperty("meta").GetProperty("truncated").GetBoolean(), "byte limit truncation");
+
+        var human = Run("find", "Test.Weapon", "--root", workspace.Root, "--human");
+        Assert(human.Stdout.Contains("\n  ", StringComparison.Ordinal), "human mode should be indented");
+
+        var warmTimer = Stopwatch.StartNew();
+        for (var iteration = 0; iteration < 5; iteration++)
+        {
+            var warm = Run("definition", "ThingDef/MyWeapon", "--root", workspace.Root, "--json");
+            AssertEqual(0, warm.ExitCode, "warm definition query");
+        }
+
+        warmTimer.Stop();
+        Console.WriteLine($"PERF query_bytes definition={definitionBytes} symbol={symbolBytes} refs={referenceBytes} affected={affectedBytes} warm_definition_avg_ms={warmTimer.Elapsed.TotalMilliseconds / 5:0.0}");
     }
 
     private static void SchemaCreation()
@@ -338,7 +401,7 @@ internal static class Program
         var result = Run("index", "--root", missingRoot, "--json");
         AssertEqual(4, result.ExitCode, "missing root exit code");
         using var document = ParseJson(result.Stdout);
-        AssertEqual(ErrorCodes.PathNotFound, document.RootElement.GetProperty("error").GetProperty("code").GetString(), "missing root error code");
+        AssertEqual(ErrorCodes.PathNotFound, document.RootElement.GetProperty("code").GetString(), "missing root error code");
         Assert(!result.Stdout.Contains(missingRoot, StringComparison.Ordinal), "error output must not expose absolute input paths");
     }
 
@@ -577,7 +640,7 @@ internal static class Program
         {
             var data = document.RootElement.GetProperty("data");
             AssertEqual("Source/Isolated.cs", data.GetProperty("changed").EnumerateArray().Single().GetString(), "absolute path normalization");
-            Assert(data.GetProperty("dependent").GetArrayLength() == 0, "isolated source has no dependents");
+            Assert(GetArray(data, "dependent").Length == 0, "isolated source has no dependents");
         }
 
         var multiple = Run(
@@ -601,9 +664,9 @@ internal static class Program
         {
             var data = document.RootElement.GetProperty("data");
             Assert(data.GetProperty("truncated").GetBoolean(), "affected result truncation");
-            var resultCount = data.GetProperty("direct").GetArrayLength() +
-                              data.GetProperty("dependent").GetArrayLength() +
-                              data.GetProperty("runtime_risk").GetArrayLength();
+            var resultCount = GetArray(data, "direct").Length +
+                              GetArray(data, "dependent").Length +
+                              GetArray(data, "runtime_risk").Length;
             Assert(resultCount <= 1, "affected global result limit");
         }
 
@@ -623,14 +686,14 @@ internal static class Program
         {
             var data = document.RootElement.GetProperty("data");
             AssertEqual("Source/Isolated.cs", data.GetProperty("changed").EnumerateArray().Single().GetString(), "deleted changed path");
-            AssertEqual(0, data.GetProperty("direct").GetArrayLength(), "deleted direct entities");
-            AssertEqual(0, data.GetProperty("dependent").GetArrayLength(), "deleted dependent entities");
+            AssertEqual(0, GetArray(data, "direct").Length, "deleted direct entities");
+            AssertEqual(0, GetArray(data, "dependent").Length, "deleted dependent entities");
         }
 
         var unknown = Run("affected", "Source/Missing.cs", "--root", workspace.Root, "--json");
         using var unknownDocument = ParseJson(unknown.Stdout);
         AssertEqual(0, unknown.ExitCode, "unknown affected path exit code");
-        AssertEqual(0, unknownDocument.RootElement.GetProperty("data").GetProperty("direct").GetArrayLength(), "unknown direct entities");
+        AssertEqual(0, GetArray(unknownDocument.RootElement.GetProperty("data"), "direct").Length, "unknown direct entities");
     }
 
     private static void ModProjectDependencyIndexing()
@@ -1088,9 +1151,9 @@ internal static class Program
         AssertEqual(0, outgoingRefs.ExitCode, "C# outgoing refs exit code");
         using (var document = ParseJson(outgoingRefs.Stdout))
         {
-            AssertEqual(0, document.RootElement.GetProperty("data").GetProperty("incoming").GetArrayLength(),
+            AssertEqual(0, GetArray(document.RootElement.GetProperty("data"), "incoming").Length,
                 "outgoing refs should omit incoming");
-            Assert(document.RootElement.GetProperty("data").GetProperty("outgoing").GetArrayLength() > 0,
+            Assert(GetArray(document.RootElement.GetProperty("data"), "outgoing").Length > 0,
                 "C# outgoing relations");
         }
 
@@ -1193,6 +1256,13 @@ internal static class Program
         var stderr = new StringWriter(CultureInfo.InvariantCulture);
         var exitCode = CliApplication.Run(args, stdout, stderr);
         return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    private static JsonElement[] GetArray(JsonElement parent, string name)
+    {
+        return parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array
+            ? value.EnumerateArray().ToArray()
+            : [];
     }
 
     private static JsonDocument ParseJson(string output)

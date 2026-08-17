@@ -5,6 +5,7 @@ public static class ErrorCodes
     public const string InvalidArgument = "INVALID_ARGUMENT";
     public const string LimitExceeded = "LIMIT_EXCEEDED";
     public const string AmbiguousEntity = "AMBIGUOUS_ENTITY";
+    public const string NotFound = "NOT_FOUND";
     public const string IndexNotFound = "INDEX_NOT_FOUND";
     public const string IndexIncompatible = "INDEX_INCOMPATIBLE";
     public const string RootMismatch = "ROOT_MISMATCH";
@@ -47,6 +48,9 @@ public static class ErrorFactory
 
     public static RimContextException AmbiguousEntity(string message, object? details = null) =>
         new(ErrorCodes.AmbiguousEntity, message, 2, details: details);
+
+    public static RimContextException NotFound(string selector) =>
+        new(ErrorCodes.NotFound, $"{selector} not found", 4);
 
     public static RimContextException IndexNotFound() =>
         new(ErrorCodes.IndexNotFound, "No RimContext index exists for the selected root.", 3);

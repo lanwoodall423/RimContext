@@ -8,6 +8,7 @@ public static class IndexConstants
     public const string SemanticIndexerVersion = "xml-csharp-harmony-v1";
     public const int DefaultLimit = 20;
     public const int MaximumLimit = 100;
+    public const int MaximumOutputBytes = 1_048_576;
     public const int DefaultAffectedDepth = 1;
 
     public static readonly string[] IgnoredDirectoryNames =
