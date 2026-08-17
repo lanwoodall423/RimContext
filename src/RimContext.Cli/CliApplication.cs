@@ -59,6 +59,7 @@ public static class CliApplication
         CliCommands.Refs => ExecuteRefs(request),
         CliCommands.Harmony => ExecuteHarmony(request),
         CliCommands.File => ExecuteFile(request),
+        CliCommands.Affected => ExecuteAffected(request),
         _ when CliCommands.IsQuery(request.Command) => throw ErrorFactory.NotImplemented(request.Command),
         _ => throw ErrorFactory.InvalidArgument($"Unknown command '{request.Command}'.")
     };
@@ -218,6 +219,16 @@ public static class CliApplication
         return JsonOutput.Success(
             CliCommands.Harmony,
             results: engine.FindHarmony(request.Subject, request.File, request.Limit));
+    }
+
+    private static JsonEnvelope ExecuteAffected(CliRequest request)
+    {
+        var configuration = WorkspaceConfiguration.Resolve(request.Root, request.Store, request.AssemblyRoots);
+        using var store = IndexStore.OpenReadOnly(configuration);
+        var engine = new SemanticQueryEngine(store);
+        return JsonOutput.Success(
+            CliCommands.Affected,
+            data: engine.FindAffected(request.Inputs, configuration.RootPath, request.Depth, request.Limit));
     }
 
     private static string GetCommandForError(IReadOnlyList<string> args)

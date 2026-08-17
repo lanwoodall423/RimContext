@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using RimContext.Core.Configuration;
 using RimContext.Core.Contracts;
 using RimContext.Core.Storage;
 
@@ -92,6 +94,22 @@ public sealed record HarmonyPatchMatch(
 public sealed record HarmonyTargetMatch(
     string Target,
     IReadOnlyList<HarmonyPatchMatch> Patches);
+
+public sealed record AffectedMatch(
+    string Kind,
+    string Id,
+    string? Name,
+    string? File,
+    int? Line,
+    string? Reason,
+    string? Confidence);
+
+public sealed record AffectedResult(
+    IReadOnlyList<string> Changed,
+    IReadOnlyList<AffectedMatch> Direct,
+    IReadOnlyList<AffectedMatch> Dependent,
+    [property: JsonPropertyName("runtime_risk")] IReadOnlyList<AffectedMatch> RuntimeRisk,
+    bool Truncated);
 
 public sealed record ModMatch(
     string Kind,
@@ -328,6 +346,372 @@ public sealed class SemanticQueryEngine
                 item.Patches.Select(ToHarmonyMatch).ToArray()))
             .ToArray();
         return candidates;
+    }
+
+    public AffectedResult FindAffected(
+        IReadOnlyList<string> changedPaths,
+        string rootPath,
+        int depth,
+        int limit)
+    {
+        ArgumentNullException.ThrowIfNull(changedPaths);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
+        if (changedPaths.Count == 0)
+        {
+            throw ErrorFactory.InvalidArgument("The affected command requires at least one path.");
+        }
+
+        var normalizedRoot = Path.GetFullPath(rootPath);
+        var changed = NormalizeAffectedPaths(changedPaths, normalizedRoot);
+        var changedFiles = files
+            .Where(file => changed.Contains(file.Path, StringComparer.OrdinalIgnoreCase))
+            .OrderBy(file => file.Path, StringComparer.Ordinal)
+            .ThenBy(file => file.Id, StringComparer.Ordinal)
+            .ToArray();
+
+        var directEntities = entities
+            .Where(IsDirectAffectedEntity)
+            .Where(entity => changedFiles.Any(file => EntityBelongsToFile(entity, file)))
+            .OrderBy(entity => AffectedKindOrder(entity.Kind))
+            .ThenBy(entity => AffectedDisplayName(entity), StringComparer.Ordinal)
+            .ThenBy(entity => FilePathFromEntity(entity), StringComparer.Ordinal)
+            .ThenBy(entity => entity.Line ?? int.MaxValue)
+            .ThenBy(entity => entity.Id, StringComparer.Ordinal)
+            .ToArray();
+
+        var directIds = directEntities
+            .Select(entity => entity.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        var dependentCandidates = new Dictionary<string, AffectedCandidate>(StringComparer.Ordinal);
+        var runtimeCandidates = new Dictionary<string, AffectedCandidate>(StringComparer.Ordinal);
+        var entityById = entities.ToDictionary(entity => entity.Id, StringComparer.Ordinal);
+        var incoming = relations
+            .Where(relation => relation.ToId is not null)
+            .GroupBy(relation => relation.ToId!, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group
+                    .OrderBy(relation => relation.Id, StringComparer.Ordinal)
+                    .ToArray(),
+                StringComparer.Ordinal);
+        var visited = new HashSet<string>(directIds, StringComparer.Ordinal);
+        var queue = new Queue<(string Id, int Distance)>();
+        var traversalTruncated = false;
+        var maximumTraversalEntities = Math.Min(4096, Math.Max(256, Math.Max(1, limit) * 32));
+        if (directEntities.Length > maximumTraversalEntities)
+        {
+            traversalTruncated = true;
+        }
+        else
+        {
+            foreach (var entity in directEntities)
+            {
+                queue.Enqueue((entity.Id, 0));
+            }
+        }
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!incoming.TryGetValue(current.Id, out var currentRelations))
+            {
+                continue;
+            }
+
+            foreach (var relation in currentRelations)
+            {
+                if (!entityById.TryGetValue(relation.FromId, out var source))
+                {
+                    continue;
+                }
+
+                if (relation.Kind is "harmony_target" or "harmony_target_member")
+                {
+                    if (!directIds.Contains(source.Id) && source.Kind == "harmony_patch")
+                    {
+                        AddAffectedCandidate(
+                            runtimeCandidates,
+                            source,
+                            current.Distance,
+                            relation,
+                            "heuristic");
+                    }
+
+                    continue;
+                }
+
+                if (relation.Kind == "owns" || current.Distance >= depth)
+                {
+                    continue;
+                }
+
+                if (!IsDependentAffectedEntity(source) || !visited.Add(source.Id))
+                {
+                    continue;
+                }
+
+                if (visited.Count > maximumTraversalEntities)
+                {
+                    traversalTruncated = true;
+                    break;
+                }
+
+                AddAffectedCandidate(
+                    dependentCandidates,
+                    source,
+                    current.Distance + 1,
+                    relation,
+                    null);
+                queue.Enqueue((source.Id, current.Distance + 1));
+            }
+
+            if (traversalTruncated)
+            {
+                break;
+            }
+        }
+
+        foreach (var directId in directIds)
+        {
+            dependentCandidates.Remove(directId);
+            runtimeCandidates.Remove(directId);
+        }
+
+        foreach (var runtimeId in runtimeCandidates.Keys)
+        {
+            dependentCandidates.Remove(runtimeId);
+        }
+
+        var directMatches = directEntities
+            .Select(entity => ToAffectedMatch(entity, "changed_file", null))
+            .ToArray();
+        var dependentMatches = dependentCandidates.Values
+            .OrderBy(item => item.Distance)
+            .ThenBy(item => AffectedKindOrder(item.Entity.Kind))
+            .ThenBy(item => AffectedDisplayName(item.Entity), StringComparer.Ordinal)
+            .ThenBy(item => FilePathFromEntity(item.Entity), StringComparer.Ordinal)
+            .ThenBy(item => item.Entity.Line ?? int.MaxValue)
+            .ThenBy(item => item.Entity.Id, StringComparer.Ordinal)
+            .Select(item => ToAffectedMatch(item.Entity, item.Reason, item.Confidence))
+            .ToArray();
+        var runtimeMatches = runtimeCandidates.Values
+            .OrderBy(item => AffectedDisplayName(item.Entity), StringComparer.Ordinal)
+            .ThenBy(item => FilePathFromEntity(item.Entity), StringComparer.Ordinal)
+            .ThenBy(item => item.Entity.Line ?? int.MaxValue)
+            .ThenBy(item => item.Entity.Id, StringComparer.Ordinal)
+            .ThenBy(item => item.Reason, StringComparer.Ordinal)
+            .Select(item => ToAffectedMatch(item.Entity, item.Reason, item.Confidence))
+            .ToArray();
+
+        var remaining = Math.Max(1, limit);
+        var returnedDirect = TakeAffectedTier(directMatches, ref remaining, out var directTruncated);
+        var returnedDependent = TakeAffectedTier(dependentMatches, ref remaining, out var dependentTruncated);
+        var returnedRuntime = TakeAffectedTier(runtimeMatches, ref remaining, out var runtimeTruncated);
+        return new AffectedResult(
+            changed,
+            returnedDirect,
+            returnedDependent,
+            returnedRuntime,
+            traversalTruncated || directTruncated || dependentTruncated || runtimeTruncated);
+    }
+
+    private IReadOnlyList<string> NormalizeAffectedPaths(
+        IReadOnlyList<string> changedPaths,
+        string rootPath)
+    {
+        var indexedPaths = files
+            .Select(file => file.Path)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        var normalized = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var input in changedPaths)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                continue;
+            }
+
+            string displayPath;
+            try
+            {
+                var candidate = Path.IsPathRooted(input)
+                    ? input
+                    : Path.Combine(rootPath, input);
+                displayPath = PathUtilities.DisplayPath(rootPath, Path.GetFullPath(candidate));
+            }
+            catch (ArgumentException ex)
+            {
+                throw ErrorFactory.InvalidArgument($"Invalid affected path '{input}': {ex.Message}");
+            }
+
+            var indexedPath = indexedPaths.FirstOrDefault(
+                path => string.Equals(path, displayPath, StringComparison.OrdinalIgnoreCase));
+            var canonicalPath = indexedPath ?? displayPath;
+            if (!normalized.TryGetValue(canonicalPath, out var existing) ||
+                string.CompareOrdinal(canonicalPath, existing) < 0)
+            {
+                normalized[canonicalPath] = canonicalPath;
+            }
+        }
+
+        if (normalized.Count == 0)
+        {
+            throw ErrorFactory.InvalidArgument("The affected command requires at least one non-empty path.");
+        }
+
+        return normalized
+            .Values
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static bool IsDirectAffectedEntity(EntityRecord entity) => entity.Kind is
+        "def" or
+        "patch_operation" or
+        "csharp_type" or
+        "csharp_member" or
+        "harmony_patch" or
+        "mod" or
+        "project" or
+        "assembly";
+
+    private static bool IsDependentAffectedEntity(EntityRecord entity) =>
+        IsDirectAffectedEntity(entity);
+
+    private static void AddAffectedCandidate(
+        IDictionary<string, AffectedCandidate> candidates,
+        EntityRecord entity,
+        int distance,
+        RelationRecord relation,
+        string? confidenceFallback)
+    {
+        if (candidates.ContainsKey(entity.Id))
+        {
+            return;
+        }
+
+        var payload = ParsePayload(relation.PayloadJson);
+        var confidence = payload.TryGetValue("confidence", out var value) &&
+                         !string.IsNullOrWhiteSpace(value)
+            ? value
+            : confidenceFallback;
+        candidates.Add(
+            entity.Id,
+            new AffectedCandidate(entity, distance, relation.Kind, confidence));
+    }
+
+    private AffectedMatch ToAffectedMatch(
+        EntityRecord entity,
+        string? reason,
+        string? confidence)
+    {
+        string? name = null;
+        string? file = null;
+        int? line = entity.Line;
+        try
+        {
+            using var document = JsonDocument.Parse(entity.PayloadJson);
+            var root = document.RootElement;
+            name = AffectedDisplayName(entity.Kind, root);
+            file = FilePath(entity, root);
+            line ??= GetInt(root, "line");
+        }
+        catch (JsonException)
+        {
+            file = FilePathFromEntity(entity);
+        }
+
+        return new AffectedMatch(
+            entity.Kind,
+            entity.Id,
+            string.IsNullOrWhiteSpace(name) ? null : name,
+            string.IsNullOrWhiteSpace(file) ? null : file,
+            line,
+            reason,
+            confidence);
+    }
+
+    private string AffectedDisplayName(EntityRecord entity)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(entity.PayloadJson);
+            return AffectedDisplayName(entity.Kind, document.RootElement) ?? entity.Kind;
+        }
+        catch (JsonException)
+        {
+            return entity.Kind;
+        }
+    }
+
+    private static string? AffectedDisplayName(string kind, JsonElement root) => kind switch
+    {
+        "def" => CombineDefName(root),
+        "csharp_type" => GetString(root, "qualifiedName") ?? GetString(root, "name"),
+        "csharp_member" => GetString(root, "qualifiedName") ?? GetString(root, "name"),
+        "harmony_patch" => CombinePatchName(root),
+        "patch_operation" => GetString(root, "operation") ??
+                              GetString(root, "operationType") ??
+                              GetString(root, "class"),
+        "mod" => GetString(root, "packageId") ?? GetString(root, "name"),
+        "project" => GetString(root, "name") ?? GetString(root, "file"),
+        "assembly" => GetString(root, "name") ?? GetString(root, "file") ?? GetString(root, "path"),
+        _ => GetString(root, "name") ?? GetString(root, "qualifiedName") ?? GetString(root, "target")
+    };
+
+    private static string? CombineDefName(JsonElement root)
+    {
+        var type = GetString(root, "defType");
+        var name = GetString(root, "defName");
+        return type is null
+            ? name
+            : name is null ? type : type + "/" + name;
+    }
+
+    private static string? CombinePatchName(JsonElement root)
+    {
+        var patchClass = GetString(root, "patchClass");
+        var patchMethod = GetString(root, "patchMethod");
+        if (patchClass is null)
+        {
+            return patchMethod;
+        }
+
+        if (patchMethod is null)
+        {
+            return patchClass;
+        }
+
+        return patchMethod.Contains('.', StringComparison.Ordinal)
+            ? patchMethod
+            : patchClass + "." + patchMethod;
+    }
+
+    private string FilePathFromEntity(EntityRecord entity)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(entity.PayloadJson);
+            return FilePath(entity, document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return entity.FileId is not null && filePaths.TryGetValue(entity.FileId, out var path)
+                ? path
+                : string.Empty;
+        }
+    }
+
+    private static AffectedMatch[] TakeAffectedTier(
+        IReadOnlyList<AffectedMatch> candidates,
+        ref int remaining,
+        out bool truncated)
+    {
+        var count = Math.Min(remaining, candidates.Count);
+        truncated = candidates.Count > count;
+        var result = candidates.Take(count).ToArray();
+        remaining -= count;
+        return result;
     }
 
     private IReadOnlyList<SearchCandidate> BuildCandidates(string selector, string? kind)
@@ -929,6 +1313,19 @@ public sealed class SemanticQueryEngine
         _ => 5
     };
 
+    private static int AffectedKindOrder(string kind) => kind switch
+    {
+        "def" => 0,
+        "patch_operation" => 1,
+        "csharp_type" => 2,
+        "csharp_member" => 3,
+        "harmony_patch" => 4,
+        "mod" => 5,
+        "project" => 6,
+        "assembly" => 7,
+        _ => 8
+    };
+
     private static string DisplayTypeName(string identity)
     {
         var first = identity.IndexOf('\0');
@@ -1031,6 +1428,12 @@ public sealed class SemanticQueryEngine
         string Target,
         int Score,
         IReadOnlyList<HarmonyPatchModel> Patches);
+
+    private sealed record AffectedCandidate(
+        EntityRecord Entity,
+        int Distance,
+        string Reason,
+        string? Confidence);
 
     private sealed record DefinitionModel(
         string Id,

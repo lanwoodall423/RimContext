@@ -130,13 +130,26 @@ public static class CliParser
             ? string.Join(' ', positionals)
             : positionals.Count == 1 ? positionals[0] : null;
 
-        return new CliRequest(command, subject, root, store, assemblyRoots, force, json, limit, depth, direction, kind, file);
+        return new CliRequest(
+            command,
+            subject,
+            positionals.ToArray(),
+            root,
+            store,
+            assemblyRoots,
+            force,
+            json,
+            limit,
+            depth,
+            direction,
+            kind,
+            file);
     }
 
     private static CliRequest HelpRequest() => Request(CliCommands.Help);
 
     private static CliRequest Request(string command) =>
-        new(command, null, null, null, Array.Empty<string>(), false, false, IndexConstants.DefaultLimit, IndexConstants.DefaultAffectedDepth, "both", null, null);
+        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, IndexConstants.DefaultLimit, IndexConstants.DefaultAffectedDepth, "both", null, null);
 
     private static string ReadValue(IReadOnlyList<string> args, ref int index, string option, string? inlineValue)
     {
@@ -207,6 +220,7 @@ public static class CliParser
         }
 
         if (CliCommands.IsQuery(command) &&
+            command != CliCommands.Affected &&
             command != CliCommands.Find &&
             !(command == CliCommands.Harmony && file is not null && positionals.Count == 0) &&
             positionals.Count != 1)

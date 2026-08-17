@@ -5,6 +5,7 @@ namespace RimContext.Cli;
 public sealed record CliRequest(
     string Command,
     string? Subject,
+    IReadOnlyList<string> Inputs,
     string? Root,
     string? Store,
     IReadOnlyList<string> AssemblyRoots,

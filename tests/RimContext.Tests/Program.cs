@@ -40,7 +40,7 @@ internal static class Program
             ("C# semantic entities and queries", CSharpSemanticEntitiesAndQueries),
             ("Harmony indexing and queries", HarmonyIndexingAndQueries),
             ("mod project and dependency indexing", ModProjectDependencyIndexing),
-            ("query command stubs", QueryCommandStubs)
+            ("affected queries", AffectedQueries)
         };
 
         var passed = 0;
@@ -475,17 +475,162 @@ internal static class Program
         Assert(!reopened.GetEntities().Any(entity => entity.Kind == "def"), "deleted XML entities should be removed");
     }
 
-    private static void QueryCommandStubs()
+    private static void AffectedQueries()
     {
-        var commands = new[] { ("affected", "def:example") };
+        using var workspace = new TempWorkspace();
+        workspace.Write(
+            "Source/Base.cs",
+            """
+            namespace Game;
+            public class Base
+            {
+                public void Tick() { }
+            }
+            """);
+        workspace.Write(
+            "Source/Use.cs",
+            """
+            namespace Game;
+            public class Use : Base
+            {
+                public void Run()
+                {
+                    var value = new Base();
+                    value.Tick();
+                }
+            }
+            """);
+        workspace.Write(
+            "Source/Patch.cs",
+            """
+            using Game;
+            [HarmonyPatch(typeof(Base), "Tick")]
+            public static class BasePatch
+            {
+                [HarmonyPostfix]
+                public static void Postfix() { }
+            }
+            """);
+        workspace.Write("Source/Isolated.cs", "namespace Isolated; public class OnlyHere { }");
+        workspace.Write("Source/CycleA.cs", "namespace Cycle; public class A : B { }");
+        workspace.Write("Source/CycleB.cs", "namespace Cycle; public class B : A { }");
+        workspace.Write(
+            "Defs/Weapons.xml",
+            """
+            <Defs>
+              <ThingDef><defName>MyWeapon</defName></ThingDef>
+            </Defs>
+            """);
+        workspace.Write(
+            "Defs/Recipes.xml",
+            """
+            <Defs>
+              <RecipeDef>
+                <defName>MakeWeapon</defName>
+                <thingDef>MyWeapon</thingDef>
+              </RecipeDef>
+            </Defs>
+            """);
 
-        foreach (var (command, subject) in commands)
+        var configuration = WorkspaceConfiguration.Resolve(workspace.Root);
+        var indexed = new WorkspaceIndexer().Build(configuration, indexedAtUtc: FixedTime);
+        AssertEqual(0, indexed.Diagnostics?.Count ?? 0, "affected fixture diagnostics");
+
+        var source = Run("affected", "Source/Base.cs", "--root", workspace.Root, "--json");
+        AssertEqual(0, source.ExitCode, "source affected exit code");
+        using (var document = ParseJson(source.Stdout))
         {
-            var result = Run(command, subject, "--json");
-            AssertEqual(6, result.ExitCode, $"{command} not implemented exit code");
-            using var document = ParseJson(result.Stdout);
-            AssertEqual(ErrorCodes.NotImplemented, document.RootElement.GetProperty("error").GetProperty("code").GetString(), $"{command} error code");
+            var data = document.RootElement.GetProperty("data");
+            AssertEqual("Source/Base.cs", data.GetProperty("changed").EnumerateArray().Single().GetString(), "source changed path");
+            Assert(data.GetProperty("direct").EnumerateArray().Any(item =>
+                item.GetProperty("kind").GetString() == "csharp_type" &&
+                item.GetProperty("name").GetString() == "Game.Base"), "direct changed type");
+            Assert(data.GetProperty("dependent").EnumerateArray().Any(item =>
+                item.GetProperty("name").GetString() == "Game.Use"), "dependent shared type");
+            var runtimeRisk = data.GetProperty("runtime_risk").EnumerateArray().ToArray();
+            Assert(runtimeRisk.Any(item =>
+                item.GetProperty("kind").GetString() == "harmony_patch" &&
+                item.GetProperty("name").GetString() == "BasePatch.Postfix"), "Harmony runtime risk");
+            Assert(runtimeRisk.All(item => item.TryGetProperty("reason", out var reason) &&
+                                           reason.GetString()!.Contains("harmony_target", StringComparison.Ordinal)),
+                "runtime risk reason");
         }
+
+        var xml = Run("affected", "Defs/Weapons.xml", "--root", workspace.Root, "--json");
+        AssertEqual(0, xml.ExitCode, "XML affected exit code");
+        using (var document = ParseJson(xml.Stdout))
+        {
+            var data = document.RootElement.GetProperty("data");
+            Assert(data.GetProperty("direct").EnumerateArray().Any(item =>
+                item.GetProperty("name").GetString() == "ThingDef/MyWeapon"), "direct changed def");
+            Assert(data.GetProperty("dependent").EnumerateArray().Any(item =>
+                item.GetProperty("name").GetString() == "RecipeDef/MakeWeapon"), "dependent referenced def");
+        }
+
+        var absolute = Run(
+            "affected",
+            Path.Combine(workspace.Root, "Source", "Isolated.cs"),
+            "--root",
+            workspace.Root,
+            "--json");
+        using (var document = ParseJson(absolute.Stdout))
+        {
+            var data = document.RootElement.GetProperty("data");
+            AssertEqual("Source/Isolated.cs", data.GetProperty("changed").EnumerateArray().Single().GetString(), "absolute path normalization");
+            Assert(data.GetProperty("dependent").GetArrayLength() == 0, "isolated source has no dependents");
+        }
+
+        var multiple = Run(
+            "affected",
+            "Source/Isolated.cs",
+            "Source/Base.cs",
+            "Source/Isolated.cs",
+            "--root",
+            workspace.Root,
+            "--json");
+        using (var document = ParseJson(multiple.Stdout))
+        {
+            var changed = document.RootElement.GetProperty("data").GetProperty("changed").EnumerateArray().ToArray();
+            AssertEqual(2, changed.Length, "multiple changed path deduplication");
+            AssertEqual("Source/Base.cs", changed[0].GetString(), "multiple path ordering");
+            AssertEqual("Source/Isolated.cs", changed[1].GetString(), "multiple path ordering second");
+        }
+
+        var limited = Run("affected", "Defs/Weapons.xml", "--root", workspace.Root, "--limit", "1", "--json");
+        using (var document = ParseJson(limited.Stdout))
+        {
+            var data = document.RootElement.GetProperty("data");
+            Assert(data.GetProperty("truncated").GetBoolean(), "affected result truncation");
+            var resultCount = data.GetProperty("direct").GetArrayLength() +
+                              data.GetProperty("dependent").GetArrayLength() +
+                              data.GetProperty("runtime_risk").GetArrayLength();
+            Assert(resultCount <= 1, "affected global result limit");
+        }
+
+        var cycle = Run("affected", "Source/CycleA.cs", "--root", workspace.Root, "--depth", "8", "--json");
+        AssertEqual(0, cycle.ExitCode, "cyclic graph affected exit code");
+        using (var document = ParseJson(cycle.Stdout))
+        {
+            Assert(document.RootElement.GetProperty("data").GetProperty("dependent").EnumerateArray().Any(item =>
+                item.GetProperty("name").GetString() == "Cycle.B"), "cyclic graph dependent");
+        }
+
+        workspace.Delete("Source/Isolated.cs");
+        var deleted = new WorkspaceIndexer().Build(configuration, indexedAtUtc: FixedTime.AddMinutes(1));
+        AssertEqual(1, deleted.Statistics.Removed, "affected deleted file index count");
+        var missing = Run("affected", "Source/Isolated.cs", "--root", workspace.Root, "--json");
+        using (var document = ParseJson(missing.Stdout))
+        {
+            var data = document.RootElement.GetProperty("data");
+            AssertEqual("Source/Isolated.cs", data.GetProperty("changed").EnumerateArray().Single().GetString(), "deleted changed path");
+            AssertEqual(0, data.GetProperty("direct").GetArrayLength(), "deleted direct entities");
+            AssertEqual(0, data.GetProperty("dependent").GetArrayLength(), "deleted dependent entities");
+        }
+
+        var unknown = Run("affected", "Source/Missing.cs", "--root", workspace.Root, "--json");
+        using var unknownDocument = ParseJson(unknown.Stdout);
+        AssertEqual(0, unknown.ExitCode, "unknown affected path exit code");
+        AssertEqual(0, unknownDocument.RootElement.GetProperty("data").GetProperty("direct").GetArrayLength(), "unknown direct entities");
     }
 
     private static void ModProjectDependencyIndexing()
