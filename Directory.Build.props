@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <RimContextToolVersion>0.1.0</RimContextToolVersion>
+    <RimContextSchemaVersion>1</RimContextSchemaVersion>
+    <Version>$(RimContextToolVersion)</Version>
+    <AssemblyVersion>$(RimContextToolVersion).0</AssemblyVersion>
+    <FileVersion>$(RimContextToolVersion).0</FileVersion>
+    <InformationalVersion>$(RimContextToolVersion)</InformationalVersion>
+    <Deterministic>true</Deterministic>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

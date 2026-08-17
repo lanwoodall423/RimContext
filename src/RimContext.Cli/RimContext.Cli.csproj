@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>RimContext.Cli</RootNamespace>
+    <AssemblyName>rimctx</AssemblyName>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RimContext.Core\RimContext.Core.csproj" />
+  </ItemGroup>
+</Project>

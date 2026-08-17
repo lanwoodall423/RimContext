@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>RimContext.Tests</RootNamespace>
+    <AssemblyName>RimContext.Tests</AssemblyName>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsTestProject>false</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RimContext.Core\RimContext.Core.csproj" />
+    <ProjectReference Include="..\..\src\RimContext.Cli\RimContext.Cli.csproj" />
+  </ItemGroup>
+</Project>

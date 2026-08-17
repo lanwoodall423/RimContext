@@ -1,0 +1,5 @@
+bin/
+obj/
+.rimctx/
+*.user
+*.suo
