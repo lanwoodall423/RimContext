@@ -1,8 +1,13 @@
 # RimContext
 
+> Moved into the canonical [RimLiaison](https://github.com/lanwoodall423/RimLiaison) repository.
+> Development, tests, and maintained agent handoffs now live there. This repository is retained for
+> history and the stable `rimctx` direct drill-down contract; use `rimliaison` first in a target
+> repository.
+
 RimContext is a local, deterministic RimWorld mod source/Defs/Harmony/dependency index for AI-agent
 navigation. It does not launch RimWorld or replace DevBridge2/RimBridgeServer runtime responsibilities.
-When RimTest is present, agents should start with RimTest and use `rimctx` directly only for narrowed
+When RimLiaison is present, agents should start with RimLiaison and use `rimctx` directly only for narrowed
 source/dependency inspection.
 
 ## Build and run
@@ -39,4 +44,4 @@ See [docs/agent-usage.md](docs/agent-usage.md) for compact-output and error deta
 CI guarantee: the Windows offline workflow builds `RimContext.sln` and runs the complete
 deterministic `RimContext.Tests` executable. RimContext remains a static analysis service; it does
 not own DevBridge lifecycle or live RimWorld execution. The pinned no-RimWorld cross-stack gate is
-owned by RimTest and checks the `rimctx/v1` affected envelope against its consumers.
+owned by RimLiaison and checks the `rimctx/v1` affected envelope against its consumers.
