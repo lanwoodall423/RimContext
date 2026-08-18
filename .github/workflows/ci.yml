@@ -1,0 +1,45 @@
+name: RimContext CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-validation:
+    name: Windows deterministic build and tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: rimcontext-nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json') }}
+          restore-keys: |
+            rimcontext-nuget-${{ runner.os }}-
+
+      - name: Build Release
+        shell: pwsh
+        run: dotnet build .\RimContext.sln --configuration Release --nologo
+
+      - name: Run deterministic offline suite
+        shell: pwsh
+        run: dotnet run --project .\tests\RimContext.Tests\RimContext.Tests.csproj --configuration Release --no-build --no-restore
+
+      - name: Check committed diff whitespace
+        shell: pwsh
+        run: git diff --check

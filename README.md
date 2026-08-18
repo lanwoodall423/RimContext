@@ -35,3 +35,8 @@ when a stricter response budget is useful; use `--human` for a person-facing ind
 
 See [docs/agent-usage.md](docs/agent-usage.md) for compact-output and error details, and
 [docs/architecture.md](docs/architecture.md) for the implemented boundaries and storage contract.
+
+CI guarantee: the Windows offline workflow builds `RimContext.sln` and runs the complete
+deterministic `RimContext.Tests` executable. RimContext remains a static analysis service; it does
+not own DevBridge lifecycle or live RimWorld execution. The pinned no-RimWorld cross-stack gate is
+owned by RimTest and checks the `rimctx/v1` affected envelope against its consumers.
